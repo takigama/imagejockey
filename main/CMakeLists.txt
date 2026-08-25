@@ -3,6 +3,7 @@ idf_component_register(
         "app_main.c"
         "button.c"
         "display.c"
+        "logbuf.c"
         "media.c"
         "msc_disk.c"
         "ota.c"

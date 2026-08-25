@@ -21,6 +21,11 @@ esp_err_t ota_update_from_github(void)
         .url = OTA_URL,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .keep_alive_enable = true,
+        /* esp_http_client's default 512-byte header buffer isn't enough --
+         * GitHub's redirect responses carry a multi-KB Content-Security-
+         * Policy header, which overflows it ("HTTP_CLIENT: Out of buffer",
+         * confirmed via web.c's /log endpoint on a real failed attempt). */
+        .buffer_size = 4096,
     };
     esp_https_ota_config_t ota_cfg = {
         .http_config = &http_cfg,

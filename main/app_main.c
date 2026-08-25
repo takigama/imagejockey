@@ -10,6 +10,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "logbuf.h"
 #include "settings.h"
 #include "ui.h"
 #include "web.h"
@@ -36,6 +37,8 @@ static bool boot_button_held(void)
 
 void app_main(void)
 {
+    logbuf_init(); /* before anything else logs -- see web.c's /log endpoint */
+
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
 

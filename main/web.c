@@ -6,6 +6,7 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "logbuf.h"
 #include "media.h"
 #include "ota.h"
 #include "sdcard.h"
@@ -415,16 +416,28 @@ static esp_err_t ota_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* Respond before the blocking download so the browser gets immediate
-     * feedback -- the device reboots on success without ever finishing a
-     * second response. */
-    httpd_resp_sendstr(req, "Checking GitHub for the latest release and downloading if newer... "
-                             "the device will reboot automatically if it updates.");
-
+    /* Call first, respond once, with the real outcome -- a response sent
+     * *before* this blocking call can't be followed by a second one, so a
+     * failure reason had nowhere to go (this bit us: OTA was silently
+     * failing and the only trace was a log line behind a console we
+     * couldn't reach without the awkward BOOT-hold-at-boot dance). On
+     * success ota_update_from_github() calls esp_restart() itself, so the
+     * device just drops the connection mid-response -- expected, fine. */
     esp_err_t err = ota_update_from_github();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(err));
-    }
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "OTA failed: %s", esp_err_to_name(err));
+    ESP_LOGE(TAG, "%s", msg);
+    httpd_resp_sendstr(req, msg);
+    return ESP_OK;
+}
+
+static esp_err_t log_get_handler(httpd_req_t *req)
+{
+    static char buf[10 * 1024];
+    logbuf_dump(buf, sizeof(buf));
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, buf);
     return ESP_OK;
 }
 
@@ -512,6 +525,7 @@ esp_err_t web_start(void)
                                                        .handler = passthrough_off_get_handler };
     static const httpd_uri_t wifi_uri = { .uri = "/wifi", .method = HTTP_POST, .handler = wifi_post_handler };
     static const httpd_uri_t ota_uri = { .uri = "/ota", .method = HTTP_GET, .handler = ota_get_handler };
+    static const httpd_uri_t log_uri = { .uri = "/log", .method = HTTP_GET, .handler = log_get_handler };
     static const httpd_uri_t upload_uri = { .uri = "/upload/*", .method = HTTP_PUT, .handler = upload_put_handler };
 
     httpd_register_uri_handler(server, &index_uri);
@@ -523,6 +537,7 @@ esp_err_t web_start(void)
     httpd_register_uri_handler(server, &passthrough_off_uri);
     httpd_register_uri_handler(server, &wifi_uri);
     httpd_register_uri_handler(server, &ota_uri);
+    httpd_register_uri_handler(server, &log_uri);
     httpd_register_uri_handler(server, &upload_uri);
 
     ESP_LOGI(TAG, "web server started");
