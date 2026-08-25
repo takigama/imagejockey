@@ -1,9 +1,11 @@
 #include "web.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "logbuf.h"
@@ -251,8 +253,26 @@ static esp_err_t index_get_handler(httpd_req_t *req)
         "<div style='margin-top:.6em'><button class='btn-primary' type='submit'>Save &amp; reboot</button></div>"
         "</form></div>"
 
-        "<h2>Firmware</h2><div class='card'>"
-        "<form method='GET' action='/ota'><button type='submit'>Check for update (GitHub)</button></form>"
+        "<h2>Firmware</h2><div class='card'>");
+    {
+        char ver_chunk[128];
+        snprintf(ver_chunk, sizeof(ver_chunk), "<p>Running %s</p>", FIRMWARE_VERSION);
+        httpd_resp_sendstr_chunk(req, ver_chunk);
+    }
+    httpd_resp_sendstr_chunk(req,
+        "<div style='margin-top:.6em'>"
+        "<button onclick=\"fetch('/ota/check').then(r=>r.text()).then(t=>{"
+        "document.getElementById('otastatus').textContent=t;"
+        "document.getElementById('otaupdatebtn').style.display="
+        "t.indexOf('update_available')===0?'inline-block':'none';})\">"
+        "Check for update</button> "
+        "<button id='otaupdatebtn' style='display:none' onclick=\"if(confirm("
+        "'Reboot without the USB drive to install the update? It comes back "
+        "with the drive active either way once done.')) "
+        "fetch('/ota/update').then(r=>r.text()).then(t=>document.getElementById('otastatus').textContent=t)\">"
+        "Update now</button>"
+        "</div>"
+        "<p id='otastatus'></p>"
         "</div>"
         "</body></html>");
     httpd_resp_sendstr_chunk(req, NULL);
@@ -408,7 +428,37 @@ static esp_err_t wifi_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-static esp_err_t ota_get_handler(httpd_req_t *req)
+/* Lightweight -- small JSON API response, no firmware download -- so this
+ * runs fine with the USB MSC drive still active. */
+static esp_err_t ota_check_get_handler(httpd_req_t *req)
+{
+    if (!wifi_is_connected()) {
+        httpd_resp_sendstr(req, "Not connected to a network with internet access -- "
+                                 "checking for updates needs a real WiFi connection, not just the SoftAP.");
+        return ESP_OK;
+    }
+
+    char latest[64];
+    bool update_available = false;
+    esp_err_t err = ota_check_for_update(latest, sizeof(latest), &update_available);
+
+    char msg[256];
+    if (err != ESP_OK) {
+        snprintf(msg, sizeof(msg), "Update check failed: %s", esp_err_to_name(err));
+    } else if (update_available) {
+        snprintf(msg, sizeof(msg), "update_available running=%s latest=%s", FIRMWARE_VERSION, latest);
+    } else {
+        snprintf(msg, sizeof(msg), "up_to_date running=%s", FIRMWARE_VERSION);
+    }
+    httpd_resp_sendstr(req, msg);
+    return ESP_OK;
+}
+
+/* The actual download+flash needs the USB MSC drive's memory back -- see
+ * ota.h's pending-update reboot cycle. This just schedules it; the real
+ * work (and the eventual pass/fail outcome) happens on the next boot,
+ * which comes back up as a normal MSC boot either way. */
+static esp_err_t ota_update_get_handler(httpd_req_t *req)
 {
     if (!wifi_is_connected()) {
         httpd_resp_sendstr(req, "Not connected to a network with internet access -- "
@@ -416,19 +466,10 @@ static esp_err_t ota_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* Call first, respond once, with the real outcome -- a response sent
-     * *before* this blocking call can't be followed by a second one, so a
-     * failure reason had nowhere to go (this bit us: OTA was silently
-     * failing and the only trace was a log line behind a console we
-     * couldn't reach without the awkward BOOT-hold-at-boot dance). On
-     * success ota_update_from_github() calls esp_restart() itself, so the
-     * device just drops the connection mid-response -- expected, fine. */
-    esp_err_t err = ota_update_from_github();
-
-    char msg[128];
-    snprintf(msg, sizeof(msg), "OTA failed: %s", esp_err_to_name(err));
-    ESP_LOGE(TAG, "%s", msg);
-    httpd_resp_sendstr(req, msg);
+    httpd_resp_sendstr(req, "Rebooting without the USB drive to install the update -- "
+                             "this takes a minute or two, then the device reboots again with the drive back. "
+                             "Check /ota/check afterwards to confirm the new version took.");
+    ota_schedule_update_reboot(); /* reboots, does not return */
     return ESP_OK;
 }
 
@@ -436,6 +477,19 @@ static esp_err_t log_get_handler(httpd_req_t *req)
 {
     static char buf[10 * 1024];
     logbuf_dump(buf, sizeof(buf));
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, buf);
+    return ESP_OK;
+}
+
+/* Zero network/TLS involvement -- just a memory snapshot, useful for
+ * checking heap headroom without triggering an actual OTA attempt. */
+static esp_err_t heap_get_handler(httpd_req_t *req)
+{
+    char buf[128];
+    snprintf(buf, sizeof(buf), "free=%u min_free=%u largest_8bit=%u\n",
+             (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_sendstr(req, buf);
     return ESP_OK;
@@ -503,8 +557,23 @@ esp_err_t web_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.stack_size = 8192;
-    config.max_uri_handlers = 12;
+    /* Was 8192 -- the /ota handler's own stack frame (diag[512]+msg[700]
+     * buffers) sits on this same worker task's stack, underneath a deep,
+     * stack-hungry call chain (esp_https_ota -> esp_http_client -> mbedTLS
+     * handshake/X.509 parsing). Symptom that led here: the message text
+     * built via snprintf() AFTER ota_update_from_github() returns was
+     * reproducibly truncated right after the first %s substitution --
+     * consistent with a stack overflow during that deep call corrupting
+     * this frame's locals, not a formatting bug (an isolated multi-%s
+     * snprintf test elsewhere confirmed formatting itself is fine).
+     * Bumping well past the default to give mbedTLS room. */
+    config.stack_size = 20480;
+    /* Was hardcoded at exactly the registered handler count more than once
+     * as endpoints got added -- httpd_register_uri_handler() fails silently
+     * (return value unchecked below) past this limit, which is how /dbgota
+     * ended up 404ing despite being registered in the code. Leave headroom
+     * instead of matching the count exactly. */
+    config.max_uri_handlers = 24;
 
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
@@ -524,21 +593,24 @@ esp_err_t web_start(void)
                                                        .method = HTTP_GET,
                                                        .handler = passthrough_off_get_handler };
     static const httpd_uri_t wifi_uri = { .uri = "/wifi", .method = HTTP_POST, .handler = wifi_post_handler };
-    static const httpd_uri_t ota_uri = { .uri = "/ota", .method = HTTP_GET, .handler = ota_get_handler };
+    static const httpd_uri_t ota_check_uri = { .uri = "/ota/check", .method = HTTP_GET, .handler = ota_check_get_handler };
+    static const httpd_uri_t ota_update_uri = { .uri = "/ota/update", .method = HTTP_GET, .handler = ota_update_get_handler };
     static const httpd_uri_t log_uri = { .uri = "/log", .method = HTTP_GET, .handler = log_get_handler };
+    static const httpd_uri_t heap_uri = { .uri = "/heap", .method = HTTP_GET, .handler = heap_get_handler };
     static const httpd_uri_t upload_uri = { .uri = "/upload/*", .method = HTTP_PUT, .handler = upload_put_handler };
 
-    httpd_register_uri_handler(server, &index_uri);
-    httpd_register_uri_handler(server, &mount_uri);
-    httpd_register_uri_handler(server, &rename_uri);
-    httpd_register_uri_handler(server, &delete_uri);
-    httpd_register_uri_handler(server, &create_uri);
-    httpd_register_uri_handler(server, &passthrough_on_uri);
-    httpd_register_uri_handler(server, &passthrough_off_uri);
-    httpd_register_uri_handler(server, &wifi_uri);
-    httpd_register_uri_handler(server, &ota_uri);
-    httpd_register_uri_handler(server, &log_uri);
-    httpd_register_uri_handler(server, &upload_uri);
+    static const httpd_uri_t *all_uris[] = {
+        &index_uri,        &mount_uri, &rename_uri,          &delete_uri,
+        &create_uri,       &passthrough_on_uri, &passthrough_off_uri, &wifi_uri,
+        &ota_check_uri,    &ota_update_uri, &log_uri,   &heap_uri,          &upload_uri,
+    };
+    for (size_t i = 0; i < sizeof(all_uris) / sizeof(all_uris[0]); i++) {
+        esp_err_t reg_err = httpd_register_uri_handler(server, all_uris[i]);
+        if (reg_err != ESP_OK) {
+            ESP_LOGE(TAG, "failed to register handler for %s: %s", all_uris[i]->uri,
+                     esp_err_to_name(reg_err));
+        }
+    }
 
     ESP_LOGI(TAG, "web server started");
     return ESP_OK;

@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "logbuf.h"
+#include "ota.h"
 #include "settings.h"
 #include "ui.h"
 #include "web.h"
@@ -39,6 +40,11 @@ void app_main(void)
 {
     logbuf_init(); /* before anything else logs -- see web.c's /log endpoint */
 
+    /* Consumed (and cleared) immediately -- see ota.h. Must happen before
+     * anything that could crash, so a bad update attempt can't loop
+     * forever retrying instead of falling back to a normal MSC boot. */
+    bool pending_update = ota_consume_pending_update_flag();
+
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
 
@@ -65,8 +71,10 @@ void app_main(void)
      * so a fresh OTA image doesn't get silently reverted to the previous one. */
     esp_ota_mark_app_valid_cancel_rollback();
 
-    bool debug_mode = boot_button_held();
-    if (debug_mode) {
+    bool debug_mode = boot_button_held() || pending_update;
+    if (pending_update) {
+        ESP_LOGW(TAG, "pending OTA update -- staying in debug/console mode, USB MSC not started");
+    } else if (debug_mode) {
         ESP_LOGW(TAG, "BOOT held at startup -- staying in debug/console mode, USB MSC not started");
     }
 
@@ -82,6 +90,20 @@ void app_main(void)
     esp_err_t web_err = web_start();
     if (web_err != ESP_OK) {
         ESP_LOGE(TAG, "web_start failed: %s", esp_err_to_name(web_err));
+    }
+
+    if (pending_update) {
+        /* Give WiFi a moment to actually associate -- wifi_init() only
+         * kicks the connection off, it doesn't wait for it. */
+        for (int i = 0; i < 100 && !wifi_is_connected(); i++) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        /* On success this reboots and never returns. On failure, fall
+         * through to a normal reboot below -- the flag is already
+         * cleared, so that next boot comes up as a regular MSC boot. */
+        ota_update_from_github();
+        ESP_LOGE(TAG, "pending OTA update failed, rebooting back to normal mode");
+        esp_restart();
     }
 
     ui_run(debug_mode); /* does not return */

@@ -44,3 +44,59 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 # reaches the "mark valid" call in app_main.c -- a safety net against a bad
 # update bricking the device (falls back after a boot-loop/watchdog reset).
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Raises the compile-time log ceiling from INFO to DEBUG -- without this,
+# DEBUG-level ESP_LOG calls are stripped out entirely at compile time and no
+# runtime esp_log_level_set() can bring them back. Needed for ota.c's
+# temporary HTTP_CLIENT debug logging while chasing the "Out of buffer" OTA
+# bug. Per-tag levels still default to INFO at runtime; this only raises the
+# ceiling of what's possible to enable.
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+
+# Enables heap corruption detection (canary bytes around every allocation,
+# fill-pattern on free, checked on every malloc/free) -- added while chasing
+# a bug where OTA attempts leave httpd's own internal URI-handler table
+# corrupted afterward (freshly-registered endpoints start 404ing right after
+# an OTA attempt, even ones that worked moments before). If something is
+# writing out of bounds during the OTA/TLS code path, this should abort with
+# a precise "corrupt heap" panic pointing at the exact allocation instead of
+# silent, delayed symptoms elsewhere. Comprehensive (not just Light) because
+# Light only catches head-of-block overwrites; Comprehensive also fills freed
+# memory and catches use-after-free. Slower and more RAM overhead -- meant to
+# be temporary, drop once the real cause is found.
+CONFIG_HEAP_POISONING_COMPREHENSIVE=y
+
+# The full default mbedTLS certificate bundle (100+ root CAs, via
+# esp_crt_bundle_attach) is heavy on a no-PSRAM board -- OTA needs exactly
+# two roots (USERTrust ECC, for github.com; ISRG Root X1/Let's Encrypt, for
+# the release-assets.githubusercontent.com redirect target), extracted via
+# openssl from the live chains and checked into certs/github_ota_roots.pem.
+# Trying this as a fix for the "Out of buffer"/memory-pressure OTA failures.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_NONE=y
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH="certs/github_ota_roots.pem"
+
+# mbedTLS's default TLS record buffers (CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN
+# defaults to 16384 bytes, allocated for the whole life of the connection)
+# are a huge single allocation on a ~300KB-heap, no-PSRAM board -- this
+# lets mbedTLS allocate them dynamically only while actually needed and
+# free them between reads/writes instead of holding them for the whole
+# session, which is ESP-IDF's own documented fix for TLS on memory-
+# constrained targets. Trying this alongside the trimmed cert bundle for
+# the "Out of buffer" OTA failures, since trimming certs alone wasn't
+# enough with TinyUSB MSC also active.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+
+# ota.c deliberately doesn't set crt_bundle_attach/cert_pem/use_global_ca_store
+# on the OTA http client anymore (cert validation disabled for now, see the
+# comment at the top of ota.c) -- esp_https_ota refuses to proceed with no
+# verification method configured unless this is set. TLS is still encrypted,
+# just not authenticated.
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
+
+# Same "no cert validation for now" intent, but for the plain esp_http_client
+# GET in ota_check_for_update() (api.github.com) rather than esp_https_ota --
+# esp-tls refuses to connect at all with no verification option configured
+# unless this default is set.
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
