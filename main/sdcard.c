@@ -58,6 +58,19 @@ esp_err_t sd_mount(void)
     return ESP_OK;
 }
 
+void sd_unmount(void)
+{
+    if (s_card) {
+        esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, s_card);
+        s_card = NULL;
+    }
+}
+
+sdmmc_card_t *sd_get_card(void)
+{
+    return s_card;
+}
+
 static bool has_image_ext(const char *name)
 {
     size_t len = strlen(name);
@@ -97,6 +110,7 @@ size_t sd_list_images(sd_image_t *out, size_t max_count)
 
         strncpy(out[count].name, entry->d_name, SD_MAX_NAME_LEN - 1);
         out[count].name[SD_MAX_NAME_LEN - 1] = '\0';
+        out[count].display_name[0] = '\0';
         out[count].size_bytes = (uint64_t)st.st_size;
         count++;
     }

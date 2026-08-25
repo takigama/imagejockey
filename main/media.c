@@ -14,6 +14,13 @@
 
 #define BLOCK_SIZE  512
 #define FATFS_DRIVE "0:" /* the only FATFS volume this project mounts */
+#define NAMES_FILE  FATFS_DRIVE "/.imgnames.tsv"
+#define NAMES_MAX_BYTES 8192
+
+typedef enum {
+    MEDIA_MODE_BOOT,
+    MEDIA_MODE_PASSTHROUGH,
+} media_mode_t;
 
 static const char *TAG = "media";
 
@@ -21,6 +28,8 @@ static sd_image_t s_images[SD_MAX_IMAGES];
 static size_t s_count = 0;
 
 static SemaphoreHandle_t s_mutex;
+static media_mode_t s_mode = MEDIA_MODE_BOOT;
+
 static FIL s_file;
 static bool s_file_open = false;
 static bool s_writable = false;
@@ -73,6 +82,144 @@ static bool open_index(size_t index)
     return true;
 }
 
+/* Caller must hold s_mutex. Matches filenames in s_images[] against the
+ * "filename\tdisplay_name" lines in NAMES_FILE. Missing file (nothing
+ * custom saved yet) is not an error. */
+static void load_display_names(void)
+{
+    FIL f;
+    if (f_open(&f, NAMES_FILE, FA_READ) != FR_OK) {
+        return;
+    }
+
+    static char buf[NAMES_MAX_BYTES + 1];
+    UINT bytes_read = 0;
+    f_read(&f, buf, NAMES_MAX_BYTES, &bytes_read);
+    f_close(&f);
+    buf[bytes_read] = '\0';
+
+    char *line = buf;
+    while (line && *line) {
+        char *nl = strchr(line, '\n');
+        if (nl) {
+            *nl = '\0';
+        }
+
+        char *tab = strchr(line, '\t');
+        if (tab) {
+            *tab = '\0';
+            const char *fname = line;
+            char *dname = tab + 1;
+            size_t dlen = strlen(dname);
+            if (dlen > 0 && dname[dlen - 1] == '\r') {
+                dname[dlen - 1] = '\0';
+            }
+
+            for (size_t i = 0; i < s_count; i++) {
+                if (strcmp(s_images[i].name, fname) == 0) {
+                    strncpy(s_images[i].display_name, dname, SD_MAX_NAME_LEN - 1);
+                    s_images[i].display_name[SD_MAX_NAME_LEN - 1] = '\0';
+                    break;
+                }
+            }
+        }
+
+        line = nl ? nl + 1 : NULL;
+    }
+}
+
+/* Caller must hold s_mutex. Rewrites the whole file from the current
+ * in-memory list -- simple and fine given at most SD_MAX_IMAGES entries. */
+static void save_display_names(void)
+{
+    FIL f;
+    if (f_open(&f, NAMES_FILE, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) {
+        ESP_LOGE(TAG, "failed to open %s for writing", NAMES_FILE);
+        return;
+    }
+
+    for (size_t i = 0; i < s_count; i++) {
+        if (s_images[i].display_name[0] == '\0') {
+            continue;
+        }
+        char line[2 * SD_MAX_NAME_LEN + 2];
+        int n = snprintf(line, sizeof(line), "%s\t%s\n", s_images[i].name, s_images[i].display_name);
+        UINT written = 0;
+        f_write(&f, line, (UINT)n, &written);
+    }
+
+    f_close(&f);
+}
+
+/* Caller must hold s_mutex. Returns the new index, or -1 on failure. */
+static int create_blank_file_locked(uint64_t size_bytes, const char *display_name)
+{
+    if (s_count >= SD_MAX_IMAGES) {
+        return -1;
+    }
+
+    char name[SD_MAX_NAME_LEN];
+    int n;
+    for (n = 1; n <= 999; n++) {
+        snprintf(name, sizeof(name), "new_image_%03d.img", n);
+        bool exists = false;
+        for (size_t i = 0; i < s_count; i++) {
+            if (strcmp(s_images[i].name, name) == 0) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            break;
+        }
+    }
+    if (n > 999) {
+        return -1;
+    }
+
+    char path[sizeof(FATFS_DRIVE) + 1 + SD_MAX_NAME_LEN];
+    snprintf(path, sizeof(path), FATFS_DRIVE "/%s", name);
+
+    FIL f;
+    FRESULT res = f_open(&f, path, FA_CREATE_NEW | FA_WRITE);
+    if (res == FR_OK) {
+        /* Seek to the last byte and write it -- extends the file to the
+         * full size via FAT cluster-chain allocation without writing real
+         * data to every intervening cluster (much faster than a real
+         * zero-fill for a multi-GB file). */
+        res = f_lseek(&f, (FSIZE_t)(size_bytes - 1));
+        if (res == FR_OK) {
+            UINT written = 0;
+            uint8_t zero = 0;
+            res = f_write(&f, &zero, 1, &written);
+        }
+        f_close(&f);
+    }
+
+    if (res != FR_OK) {
+        ESP_LOGE(TAG, "create/preallocate %s failed: %d", path, res);
+        f_unlink(path);
+        return -1;
+    }
+
+    size_t new_index = s_count;
+    strncpy(s_images[new_index].name, name, SD_MAX_NAME_LEN - 1);
+    s_images[new_index].name[SD_MAX_NAME_LEN - 1] = '\0';
+    s_images[new_index].size_bytes = size_bytes;
+    s_images[new_index].display_name[0] = '\0';
+    if (display_name && display_name[0]) {
+        strncpy(s_images[new_index].display_name, display_name, SD_MAX_NAME_LEN - 1);
+        s_images[new_index].display_name[SD_MAX_NAME_LEN - 1] = '\0';
+    }
+    s_count++;
+
+    if (s_images[new_index].display_name[0]) {
+        save_display_names();
+    }
+
+    return (int)new_index;
+}
+
 esp_err_t media_init(void)
 {
     s_mutex = xSemaphoreCreateMutex();
@@ -82,6 +229,7 @@ esp_err_t media_init(void)
         return err;
     }
     s_count = sd_list_images(s_images, SD_MAX_IMAGES);
+    load_display_names();
     ESP_LOGI(TAG, "found %d image(s) on SD card", (int)s_count);
 
     char last_name[SD_MAX_NAME_LEN];
@@ -113,6 +261,11 @@ const char *media_name(size_t index)
     return s_images[index].name;
 }
 
+const char *media_display_name(size_t index)
+{
+    return s_images[index].display_name[0] ? s_images[index].display_name : s_images[index].name;
+}
+
 uint64_t media_size(size_t index)
 {
     return s_images[index].size_bytes;
@@ -140,6 +293,7 @@ void media_mount(size_t index)
     }
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_mode = MEDIA_MODE_BOOT;
     bool ok = open_index(index);
     xSemaphoreGive(s_mutex);
 
@@ -154,83 +308,139 @@ void media_mount(size_t index)
     msc_disk_notify_mount_changed();
 }
 
+int media_create(uint64_t size_bytes, const char *display_name)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    int idx = create_blank_file_locked(size_bytes, display_name);
+    xSemaphoreGive(s_mutex);
+
+    if (idx >= 0) {
+        ESP_LOGI(TAG, "created: %s", s_images[idx].name);
+    }
+    return idx;
+}
+
 esp_err_t media_create_and_mount(uint64_t size_bytes)
 {
-    if (s_count >= SD_MAX_IMAGES) {
-        return ESP_ERR_NO_MEM;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_mode = MEDIA_MODE_BOOT;
+    int idx = create_blank_file_locked(size_bytes, NULL);
+    bool ok = false;
+    if (idx >= 0) {
+        ok = open_index((size_t)idx);
+    }
+    xSemaphoreGive(s_mutex);
+
+    if (idx < 0 || !ok) {
+        return ESP_FAIL;
     }
 
-    char name[SD_MAX_NAME_LEN];
-    int n;
-    for (n = 1; n <= 999; n++) {
-        snprintf(name, sizeof(name), "new_image_%03d.img", n);
-        bool exists = false;
-        for (size_t i = 0; i < s_count; i++) {
-            if (strcmp(s_images[i].name, name) == 0) {
-                exists = true;
-                break;
-            }
-        }
-        if (!exists) {
-            break;
-        }
-    }
-    if (n > 999) {
-        return ESP_ERR_NO_MEM;
+    s_mounted = idx;
+    settings_save_mounted_name(s_images[idx].name);
+    ESP_LOGI(TAG, "created and mounted: %s (%llu bytes)", s_images[idx].name, (unsigned long long)size_bytes);
+    msc_disk_notify_mount_changed();
+    return ESP_OK;
+}
+
+esp_err_t media_delete(size_t index)
+{
+    if (index >= s_count) {
+        return ESP_ERR_INVALID_ARG;
     }
 
     char path[sizeof(FATFS_DRIVE) + 1 + SD_MAX_NAME_LEN];
-    snprintf(path, sizeof(path), FATFS_DRIVE "/%s", name);
+    snprintf(path, sizeof(path), FATFS_DRIVE "/%s", s_images[index].name);
 
-    /* Everything below touches the FatFs volume, which isn't reentrant --
-     * held for the whole operation (not just via media_mount(), which would
-     * self-deadlock on this same non-recursive mutex) because the host can
-     * be polling the currently-mounted file from TinyUSB's task at any
-     * moment, including mid-creation. */
     xSemaphoreTake(s_mutex, portMAX_DELAY);
 
-    FIL f;
-    FRESULT res = f_open(&f, path, FA_CREATE_NEW | FA_WRITE);
+    if ((int)index == s_mounted) {
+        close_current();
+        s_mounted = -1;
+    }
+
+    FRESULT res = f_unlink(path);
     if (res == FR_OK) {
-        /* Seek to the last byte and write it -- extends the file to the
-         * full size via FAT cluster-chain allocation without writing real
-         * data to every intervening cluster (much faster than a real
-         * zero-fill for a multi-GB file). */
-        res = f_lseek(&f, (FSIZE_t)(size_bytes - 1));
-        if (res == FR_OK) {
-            UINT written = 0;
-            uint8_t zero = 0;
-            res = f_write(&f, &zero, 1, &written);
+        for (size_t i = index; i + 1 < s_count; i++) {
+            s_images[i] = s_images[i + 1];
         }
-        f_close(&f);
+        s_count--;
+        if (s_mounted > (int)index) {
+            s_mounted--;
+        }
+        save_display_names();
     }
 
-    if (res != FR_OK) {
-        ESP_LOGE(TAG, "create/preallocate %s failed: %d", path, res);
-        f_unlink(path);
-        xSemaphoreGive(s_mutex);
-        return ESP_FAIL;
-    }
-
-    strncpy(s_images[s_count].name, name, SD_MAX_NAME_LEN - 1);
-    s_images[s_count].name[SD_MAX_NAME_LEN - 1] = '\0';
-    s_images[s_count].size_bytes = size_bytes;
-    size_t new_index = s_count;
-    s_count++;
-
-    bool ok = open_index(new_index);
     xSemaphoreGive(s_mutex);
 
-    if (!ok) {
-        s_mounted = -1;
+    if (res != FR_OK) {
+        ESP_LOGE(TAG, "delete %s failed: %d", path, res);
         return ESP_FAIL;
     }
 
-    s_mounted = (int)new_index;
-    settings_save_mounted_name(name);
-    ESP_LOGI(TAG, "created and mounted: %s (%llu bytes)", name, (unsigned long long)size_bytes);
-    msc_disk_notify_mount_changed();
+    ESP_LOGI(TAG, "deleted: %s", path);
+    if (index == (size_t)s_mounted + 1 || s_mounted == -1) {
+        /* mounted image was removed (or nothing was mounted) -- let the
+         * host notice there's no media right now rather than silently keep
+         * serving whatever was in the (now-closed) file handle. */
+        msc_disk_notify_mount_changed();
+    }
     return ESP_OK;
+}
+
+void media_set_display_name(size_t index, const char *display_name)
+{
+    if (index >= s_count) {
+        return;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (display_name && display_name[0]) {
+        strncpy(s_images[index].display_name, display_name, SD_MAX_NAME_LEN - 1);
+        s_images[index].display_name[SD_MAX_NAME_LEN - 1] = '\0';
+    } else {
+        s_images[index].display_name[0] = '\0';
+    }
+    save_display_names();
+    xSemaphoreGive(s_mutex);
+}
+
+void media_enter_passthrough(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    close_current();
+    s_mode = MEDIA_MODE_PASSTHROUGH;
+    xSemaphoreGive(s_mutex);
+
+    ESP_LOGW(TAG, "entering SD passthrough mode -- whole card exposed raw to host");
+    msc_disk_notify_mount_changed();
+}
+
+esp_err_t media_exit_passthrough(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    sd_unmount();
+    esp_err_t err = sd_mount();
+    if (err == ESP_OK) {
+        s_count = sd_list_images(s_images, SD_MAX_IMAGES);
+        load_display_names();
+    } else {
+        s_count = 0;
+    }
+    s_mounted = -1; /* host changed who-knows-what; stay explicit rather than guess */
+    s_mode = MEDIA_MODE_BOOT;
+
+    xSemaphoreGive(s_mutex);
+
+    ESP_LOGI(TAG, "exited SD passthrough mode, re-mounted (%s), found %d image(s)",
+             err == ESP_OK ? "ok" : esp_err_to_name(err), (int)s_count);
+    msc_disk_notify_mount_changed();
+    return err;
+}
+
+bool media_is_passthrough(void)
+{
+    return s_mode == MEDIA_MODE_PASSTHROUGH;
 }
 
 esp_err_t media_upload_begin(const char *filename)
@@ -284,6 +494,7 @@ void media_upload_end(bool success, const char *filename, uint64_t size_bytes)
     if (success && s_count < SD_MAX_IMAGES) {
         strncpy(s_images[s_count].name, filename, SD_MAX_NAME_LEN - 1);
         s_images[s_count].name[SD_MAX_NAME_LEN - 1] = '\0';
+        s_images[s_count].display_name[0] = '\0';
         s_images[s_count].size_bytes = size_bytes;
         s_count++;
         ESP_LOGI(TAG, "upload complete: %s (%llu bytes)", filename, (unsigned long long)size_bytes);
@@ -297,15 +508,15 @@ void media_upload_end(bool success, const char *filename, uint64_t size_bytes)
 bool media_is_mounted(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    bool mounted = s_file_open;
+    bool ready = (s_mode == MEDIA_MODE_PASSTHROUGH) ? (sd_get_card() != NULL) : s_file_open;
     xSemaphoreGive(s_mutex);
-    return mounted;
+    return ready;
 }
 
 bool media_is_writable(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    bool writable = s_writable;
+    bool writable = (s_mode == MEDIA_MODE_PASSTHROUGH) ? true : s_writable;
     xSemaphoreGive(s_mutex);
     return writable;
 }
@@ -313,65 +524,85 @@ bool media_is_writable(void)
 uint32_t media_block_count(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    uint32_t blocks = (uint32_t)(s_mounted_size / BLOCK_SIZE);
+    uint32_t blocks;
+    if (s_mode == MEDIA_MODE_PASSTHROUGH) {
+        sdmmc_card_t *card = sd_get_card();
+        blocks = card ? (uint32_t)card->csd.capacity : 0;
+    } else {
+        blocks = (uint32_t)(s_mounted_size / BLOCK_SIZE);
+    }
     xSemaphoreGive(s_mutex);
     return blocks;
 }
+
+/* Both read/write below assume exactly one 512-byte block per call (offset
+ * always 0) -- true as long as CFG_TUD_MSC_BUFSIZE stays 512 (see
+ * components/esp_tinyusb_core/include/tusb_config.h), which is what makes
+ * passthrough's 1:1 lba-to-sdmmc-sector mapping valid without needing to
+ * handle partial-block offsets or multi-sector transfers per callback. */
 
 int32_t media_read(uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
 
-    if (!s_file_open) {
-        xSemaphoreGive(s_mutex);
-        return -1;
-    }
-
-    FSIZE_t pos = (FSIZE_t)lba * BLOCK_SIZE + offset;
-    FRESULT res = f_lseek(&s_file, pos);
-    UINT bytes_done = 0;
-    if (res == FR_OK) {
-        res = f_read(&s_file, buffer, bufsize, &bytes_done);
+    int32_t result;
+    if (s_mode == MEDIA_MODE_PASSTHROUGH) {
+        sdmmc_card_t *card = sd_get_card();
+        esp_err_t err = card ? sdmmc_read_sectors(card, buffer, lba, bufsize / BLOCK_SIZE) : ESP_FAIL;
+        result = (err == ESP_OK) ? (int32_t)bufsize : -1;
+    } else if (s_file_open) {
+        FSIZE_t pos = (FSIZE_t)lba * BLOCK_SIZE + offset;
+        FRESULT res = f_lseek(&s_file, pos);
+        UINT bytes_done = 0;
+        if (res == FR_OK) {
+            res = f_read(&s_file, buffer, bufsize, &bytes_done);
+        }
+        result = (res == FR_OK) ? (int32_t)bytes_done : -1;
+    } else {
+        result = -1;
     }
 
     xSemaphoreGive(s_mutex);
 
-    if (res != FR_OK) {
-        ESP_LOGE(TAG, "read failed at lba=%lu: %d", (unsigned long)lba, res);
-        return -1;
+    if (result < 0) {
+        ESP_LOGE(TAG, "read failed at lba=%lu", (unsigned long)lba);
     }
-    return (int32_t)bytes_done;
+    return result;
 }
 
 int32_t media_write(uint32_t lba, uint32_t offset, const uint8_t *buffer, uint32_t bufsize)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
 
-    if (!s_file_open || !s_writable) {
-        xSemaphoreGive(s_mutex);
-        return -1;
-    }
-
-    FSIZE_t pos = (FSIZE_t)lba * BLOCK_SIZE + offset;
-    FRESULT res = f_lseek(&s_file, pos);
-    UINT bytes_done = 0;
-    if (res == FR_OK) {
-        res = f_write(&s_file, buffer, bufsize, &bytes_done);
+    int32_t result;
+    if (s_mode == MEDIA_MODE_PASSTHROUGH) {
+        sdmmc_card_t *card = sd_get_card();
+        esp_err_t err = card ? sdmmc_write_sectors(card, buffer, lba, bufsize / BLOCK_SIZE) : ESP_FAIL;
+        result = (err == ESP_OK) ? (int32_t)bufsize : -1;
+    } else if (s_file_open && s_writable) {
+        FSIZE_t pos = (FSIZE_t)lba * BLOCK_SIZE + offset;
+        FRESULT res = f_lseek(&s_file, pos);
+        UINT bytes_done = 0;
+        if (res == FR_OK) {
+            res = f_write(&s_file, buffer, bufsize, &bytes_done);
+        }
+        result = (res == FR_OK) ? (int32_t)bytes_done : -1;
+    } else {
+        result = -1;
     }
 
     xSemaphoreGive(s_mutex);
 
-    if (res != FR_OK) {
-        ESP_LOGE(TAG, "write failed at lba=%lu: %d", (unsigned long)lba, res);
-        return -1;
+    if (result < 0) {
+        ESP_LOGE(TAG, "write failed at lba=%lu", (unsigned long)lba);
     }
-    return (int32_t)bytes_done;
+    return result;
 }
 
 void media_sync(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_file_open && s_writable) {
+    if (s_mode == MEDIA_MODE_BOOT && s_file_open && s_writable) {
         f_sync(&s_file);
     }
     xSemaphoreGive(s_mutex);

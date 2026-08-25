@@ -99,7 +99,7 @@ static void draw_browse(size_t count, int selected, bool show_selected_flash,
         }
         char name[32];
         int n = name_max < (int)sizeof(name) - 1 ? name_max : (int)sizeof(name) - 1;
-        strncpy(name, media_name((size_t)idx), n);
+        strncpy(name, media_display_name((size_t)idx), n);
         name[n] = '\0';
         display_draw_text(2 * DISPLAY_CHAR_W, text_y, name, row_fg, row_bg);
 
@@ -148,8 +148,9 @@ void ui_run(bool debug_mode)
         ESP_LOGW(TAG, "debug mode: USB MSC not started, console stays available");
     }
 
-    size_t count = media_count();
-    int selected = media_mounted_index();
+    size_t last_count = media_count();
+    int last_mounted = media_mounted_index();
+    int selected = last_mounted;
     if (selected < 0) {
         selected = 0;
     }
@@ -166,8 +167,24 @@ void ui_run(bool debug_mode)
     const int chars_per_row = DISPLAY_WIDTH / DISPLAY_CHAR_W;
 
     while (1) {
+        /* The web UI can create/delete/rename/mount images concurrently --
+         * poll for that rather than trusting a count cached from the last
+         * time *this* loop changed something. */
+        size_t count = media_count();
+        int mounted_now = media_mounted_index();
+        if (count != last_count || mounted_now != last_mounted) {
+            last_count = count;
+            last_mounted = mounted_now;
+            dirty = true;
+        }
+
+        size_t total_rows = count + 1; /* + the synthetic "+ NEW IMAGE" row */
+        if ((size_t)selected >= total_rows) {
+            selected = (int)(total_rows - 1);
+            dirty = true;
+        }
+
         button_event_t ev = button_poll();
-        size_t total_rows = count + 1;
 
         if (mode == UI_MODE_BROWSE) {
             if (ev == BUTTON_EVENT_SHORT_PRESS && total_rows > 0) {
