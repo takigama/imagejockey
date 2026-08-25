@@ -1,0 +1,46 @@
+# Board is a LilyGO T-Dongle-S3: ESP32-S3, 16MB flash, single native USB-OTG
+# port (no separate UART bridge chip) doubling as both the flashing port and
+# the app's own USB device. Picking this target here means a fresh checkout
+# just needs `idf.py build` — no manual `set-target` step.
+CONFIG_IDF_TARGET="esp32s3"
+
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Console over the internal USB-Serial/JTAG peripheral. ESP32-S3 has only one
+# physical USB D+/D- pin pair (GPIO19/20), muxed in hardware between this
+# peripheral and the full USB-OTG (dwc2) controller. esptool's own ROM
+# download-mode session on this board came up as "USB mode: USB-Serial/JTAG"
+# (confirmed empirically, not just from docs), and this peripheral is simpler
+# and known-good on this exact cable/port, so it's the console for early
+# bring-up. This will need to be reconsidered once app firmware switches the
+# shared pins over to the OTG controller for TinyUSB MSC in a later phase —
+# see the project plan's reflash/console caveat.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# main task's default 3.5KB stack is tight once the UI loop's snprintf
+# buffers and SD directory-listing calls are in the mix.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
+# Long filenames (heap-allocated buffer, not stack) so real-world ISO names
+# like "ubuntu-24.04.1-desktop-amd64.iso" round-trip through FatFs intact.
+CONFIG_FATFS_LFN_HEAP=y
+
+# Note: no CONFIG_TINYUSB_MSC_ENABLED here -- components/esp_tinyusb_core
+# (a trimmed local fork of esp_tinyusb, see its CMakeLists.txt) hardcodes
+# CFG_TUD_MSC on directly instead, since that Kconfig flag also pulls in
+# esp_tinyusb's own conflicting tud_msc_* callback implementations.
+
+# OTA-capable partition table (two 2MB app slots + otadata) instead of the
+# single-factory-partition default -- see partitions.csv. 2MB/slot is
+# generous headroom on a 16MB chip even with WiFi+HTTPS+OTA+display+SD+USB
+# all linked in (current build is under 400KB).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Auto-rollback to the previous working image if the new OTA image never
+# reaches the "mark valid" call in app_main.c -- a safety net against a bad
+# update bricking the device (falls back after a boot-loop/watchdog reset).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

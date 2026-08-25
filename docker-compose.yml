@@ -1,0 +1,17 @@
+services:
+  # Non-device commands (build, menuconfig, fullclean, an interactive shell).
+  # Flashing/monitoring need a serial device passed through at `docker run`
+  # time instead — see scripts/flash.sh and scripts/monitor.sh — because the
+  # /dev node only exists once the board is attached via `usbipd attach --wsl`,
+  # and docker compose can't conditionally mount a device that may not exist yet.
+  idf:
+    build:
+      context: ./docker
+    image: tdisplay-media-idf:v5.5.5
+    working_dir: /project
+    volumes:
+      - .:/project
+    environment:
+      - IDF_TARGET=esp32s3
+    tty: true
+    stdin_open: true

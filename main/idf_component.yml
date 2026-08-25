@@ -1,0 +1,16 @@
+dependencies:
+  idf: ">=5.0"
+  # Community-maintained ST7735 driver for the esp_lcd panel API. There's no
+  # first-party `espressif/esp_lcd_st7735` — this is the one referenced by
+  # LilyGO's own T-Dongle-S3 examples' bsp_lcd usage.
+  waveshare/esp_lcd_st7735: "^1.0.1"
+  # NOTE: NOT depending on espressif/esp_tinyusb here. Its tud_msc_* storage
+  # wrapper (tinyusb_msc.c) is compiled in unconditionally whenever its
+  # CONFIG_TINYUSB_MSC_ENABLED Kconfig flag is on, and that flag is also the
+  # only way to get CFG_TUD_MSC=1 out of its tusb_config.h -- there's no way
+  # to get the raw TinyUSB MSC class code without also pulling in symbols
+  # that collide with our own tud_msc_* callbacks (msc_disk.c). Instead,
+  # components/esp_tinyusb_core/ is a trimmed local fork of esp_tinyusb with
+  # the storage-wrapper files removed and CFG_TUD_MSC hardcoded on -- see the
+  # comment at the top of that component's CMakeLists.txt. It declares its
+  # own dependency on the raw espressif/tinyusb core.
