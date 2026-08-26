@@ -30,8 +30,11 @@ your router (most consumer routers register it; no mDNS responder is set up, so 
 browse to the device's address for a page that lists images (tap to mount), lets you upload new ones
 (drag a file in, streamed straight to the SD card), set WiFi credentials, and check for firmware updates.
 
-**Reflashing/managing images without removing the SD card:** just use the WiFi upload page above —
-there's no separate USB drag-and-drop mode.
+**Reflashing/managing images without removing the SD card:** either use the WiFi upload page above, or
+hit "Enable SD passthrough" on it — that exposes the *whole* SD card raw over USB, like a normal card
+reader, instead of just the currently-mounted image. Good for large files or when WiFi upload would be
+too slow. While passthrough is on, the device isn't presenting as a bootable image drive; disable it
+(same page) to go back to normal operation once you're done copying files.
 
 ## Installing
 
