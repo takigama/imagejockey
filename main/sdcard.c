@@ -22,7 +22,23 @@
 #define PIN_SD_D3  18
 
 static const char *TAG = "sdcard";
-static sdmmc_card_t *s_card = NULL;
+static sdmmc_card_t *s_card = NULL;    /* the currently active card, whichever mode set it */
+static sdmmc_card_t s_raw_card_storage;
+static sdmmc_host_t s_raw_host;
+static bool s_raw_active = false;
+
+static void configure_slot(sdmmc_slot_config_t *slot_config)
+{
+    *slot_config = (sdmmc_slot_config_t)SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config->width = 4;
+    slot_config->clk = PIN_SD_CLK;
+    slot_config->cmd = PIN_SD_CMD;
+    slot_config->d0 = PIN_SD_D0;
+    slot_config->d1 = PIN_SD_D1;
+    slot_config->d2 = PIN_SD_D2;
+    slot_config->d3 = PIN_SD_D3;
+    slot_config->flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+}
 
 esp_err_t sd_mount(void)
 {
@@ -35,15 +51,8 @@ esp_err_t sd_mount(void)
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.max_freq_khz = SDMMC_FREQ_DEFAULT;
 
-    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-    slot_config.width = 4;
-    slot_config.clk = PIN_SD_CLK;
-    slot_config.cmd = PIN_SD_CMD;
-    slot_config.d0 = PIN_SD_D0;
-    slot_config.d1 = PIN_SD_D1;
-    slot_config.d2 = PIN_SD_D2;
-    slot_config.d3 = PIN_SD_D3;
-    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+    sdmmc_slot_config_t slot_config;
+    configure_slot(&slot_config);
 
     esp_err_t err = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &host, &slot_config, &mount_config, &s_card);
     if (err != ESP_OK) {
@@ -60,8 +69,59 @@ esp_err_t sd_mount(void)
 
 void sd_unmount(void)
 {
-    if (s_card) {
+    if (s_card && !s_raw_active) {
         esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, s_card);
+        s_card = NULL;
+    }
+}
+
+esp_err_t sd_mount_raw(void)
+{
+    s_raw_host = (sdmmc_host_t)SDMMC_HOST_DEFAULT();
+    s_raw_host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+
+    sdmmc_slot_config_t slot_config;
+    configure_slot(&slot_config);
+
+    esp_err_t err = s_raw_host.init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "raw host init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = sdmmc_host_init_slot(s_raw_host.slot, &slot_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "raw slot init failed: %s", esp_err_to_name(err));
+        s_raw_host.deinit();
+        return err;
+    }
+
+    memset(&s_raw_card_storage, 0, sizeof(s_raw_card_storage));
+    err = sdmmc_card_init(&s_raw_host, &s_raw_card_storage);
+    if (err != ESP_OK) {
+        /* A real hardware/comms failure -- unlike esp_vfs_fat_sdmmc_mount(),
+         * this function's whole point is to succeed regardless of whether
+         * the card has a recognizable filesystem on it, so a failure here
+         * means the card genuinely isn't responding (wiring/seating/dead
+         * card), not "no filesystem". */
+        ESP_LOGE(TAG, "raw card init failed: %s", esp_err_to_name(err));
+        sdmmc_host_deinit_slot(s_raw_host.slot);
+        s_raw_host.deinit();
+        return err;
+    }
+
+    s_raw_active = true;
+    s_card = &s_raw_card_storage;
+    sdmmc_card_print_info(stdout, s_card);
+    return ESP_OK;
+}
+
+void sd_unmount_raw(void)
+{
+    if (s_raw_active) {
+        sdmmc_host_deinit_slot(s_raw_host.slot);
+        s_raw_host.deinit();
+        s_raw_active = false;
         s_card = NULL;
     }
 }

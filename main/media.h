@@ -65,13 +65,15 @@ void media_set_display_name(size_t index, const char *display_name);
 /* SD passthrough mode: exposes the whole SD card's raw sectors directly to
  * the USB host (like a normal card reader) instead of a single mounted
  * image's bytes -- for dragging large files on directly over USB instead of
- * WiFi. Entering just closes any open image file (the FatFs mount itself
- * stays up, untouched, since passthrough talks to the card below FatFs).
- * Exiting force-remounts FatFs and re-lists images, since the host may have
- * changed anything about the filesystem while it had raw access -- FatFs's
- * cached understanding of the old volume can't be trusted afterward. Either
- * transition triggers a USB soft-reconnect. */
-void media_enter_passthrough(void);
+ * WiFi, or for fixing/reformatting a card that doesn't have a usable
+ * filesystem at all. Entering unmounts FatFs and switches to a raw SDMMC
+ * card handle (sd_mount_raw()) that works regardless of what's currently on
+ * the card -- this can fail if the card genuinely isn't responding
+ * (wiring/seating/dead card), reported via the return value. Exiting
+ * force-remounts FatFs and re-lists images, since the host may have changed
+ * anything about the filesystem while it had raw access. Either transition
+ * triggers a USB soft-reconnect. */
+esp_err_t media_enter_passthrough(void);
 esp_err_t media_exit_passthrough(void);
 bool media_is_passthrough(void);
 

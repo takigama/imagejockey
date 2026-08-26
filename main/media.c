@@ -404,22 +404,31 @@ void media_set_display_name(size_t index, const char *display_name)
     xSemaphoreGive(s_mutex);
 }
 
-void media_enter_passthrough(void)
+esp_err_t media_enter_passthrough(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     close_current();
-    s_mode = MEDIA_MODE_PASSTHROUGH;
+    sd_unmount(); /* release FatFs's hold on the hardware before raw-initing it */
+    esp_err_t err = sd_mount_raw();
+    if (err == ESP_OK) {
+        s_mode = MEDIA_MODE_PASSTHROUGH;
+    }
     xSemaphoreGive(s_mutex);
 
-    ESP_LOGW(TAG, "entering SD passthrough mode -- whole card exposed raw to host");
-    msc_disk_notify_mount_changed();
+    if (err == ESP_OK) {
+        ESP_LOGW(TAG, "entering SD passthrough mode -- whole card exposed raw to host");
+        msc_disk_notify_mount_changed();
+    } else {
+        ESP_LOGE(TAG, "failed to enter SD passthrough mode: %s", esp_err_to_name(err));
+    }
+    return err;
 }
 
 esp_err_t media_exit_passthrough(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
 
-    sd_unmount();
+    sd_unmount_raw();
     esp_err_t err = sd_mount();
     if (err == ESP_OK) {
         s_count = sd_list_images(s_images, SD_MAX_IMAGES);

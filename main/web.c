@@ -299,7 +299,13 @@ static esp_err_t mount_get_handler(httpd_req_t *req)
 
 static esp_err_t passthrough_on_get_handler(httpd_req_t *req)
 {
-    media_enter_passthrough();
+    esp_err_t err = media_enter_passthrough();
+    if (err != ESP_OK) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Couldn't enter SD passthrough mode: %s", esp_err_to_name(err));
+        httpd_resp_sendstr(req, msg);
+        return ESP_OK;
+    }
     httpd_resp_set_status(req, "303 See Other");
     httpd_resp_set_hdr(req, "Location", "/");
     httpd_resp_send(req, NULL, 0);

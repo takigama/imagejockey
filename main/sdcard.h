@@ -23,14 +23,31 @@ esp_err_t sd_mount(void);
  * about the filesystem while it had raw sector access, so FatFs's cached
  * understanding of the volume (cluster size, FAT layout, etc., read once at
  * mount time) has to be thrown away and re-read fresh via sd_mount() again
- * rather than trusted. Not needed to *enter* passthrough -- that mode talks
- * to the card below FatFs entirely, so the existing mount can stay up. */
+ * rather than trusted. */
 void sd_unmount(void);
 
-/* The raw SDMMC card object underlying the FatFs mount -- used for direct
- * sdmmc_read_sectors()/write_sectors() access in SD passthrough mode,
- * bypassing FatFs. Valid whenever sd_mount() has succeeded and sd_unmount()
- * hasn't been called since; NULL otherwise. */
+/* Initializes raw SDMMC communication with the card *without* attempting a
+ * FatFs mount -- unlike sd_mount(), this succeeds even if the card has no
+ * recognizable filesystem on it (blank, mid-repartition, wrong filesystem,
+ * etc.), which is exactly the state SD passthrough mode is often used to
+ * fix. sd_mount() can't be reused for this: ESP-IDF's
+ * esp_vfs_fat_sdmmc_mount() frees its internal card object and never hands
+ * it back if the filesystem-mount step fails, even though the lower-level
+ * SD communication that step depends on already succeeded by that point --
+ * so a card with no filesystem previously made sd_get_card() return NULL
+ * during passthrough too, defeating the point. Call sd_unmount() first if a
+ * FatFs mount is currently active; the two can't be up at once (same
+ * physical SDMMC host/slot). */
+esp_err_t sd_mount_raw(void);
+
+/* Releases what sd_mount_raw() set up. */
+void sd_unmount_raw(void);
+
+/* The current SDMMC card object -- from whichever of sd_mount() or
+ * sd_mount_raw() was called most recently, used for direct
+ * sdmmc_read_sectors()/write_sectors() access in SD passthrough mode
+ * (bypassing FatFs) as well as for capacity/info queries. NULL if neither
+ * is currently mounted. */
 sdmmc_card_t *sd_get_card(void);
 
 /* Lists *.iso / *.img files at the SD card root into `out` (capacity
