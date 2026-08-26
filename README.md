@@ -35,14 +35,21 @@ there's no separate USB drag-and-drop mode.
 
 ## Installing
 
-**First time:** download the four files attached to the
-[latest release](https://github.com/takigama/imagejockey/releases/latest) and flash them with `esptool`
-— see [build.md](build.md) for the exact command.
+**First time**, pick one:
 
-**After that:** updates don't need a cable. On the device's web page, hit "Check for update" (works
-fine with the drive still plugged in and in use) and, if one's available, "Update now" — the device
-briefly reboots without presenting as a USB drive to install it, then comes back normal. Requires the
-device to be joined to real WiFi with internet access (its own SoftAP alone won't reach GitHub).
+- **From a browser** — [flash it from this page](https://takigama.github.io/imagejockey/) (Chrome or
+  Edge only — needs the Web Serial API). No software to install; just plug the board in, put it in
+  download mode, and click a button.
+- **From the command line** — download the four files attached to the
+  [latest release](https://github.com/takigama/imagejockey/releases/latest) and flash them with
+  `esptool` — see [build.md](build.md) for the exact command, and for why it's four files instead of
+  one.
+
+**After that:** updates don't need a cable or the browser flasher. On the device's web page, hit "Check
+for update" (works fine with the drive still plugged in and in use) and, if one's available, "Update
+now" — the device briefly reboots without presenting as a USB drive to install it, then comes back
+normal. Requires the device to be joined to real WiFi with internet access (its own SoftAP alone won't
+reach GitHub).
 
 ## Known limitations
 

@@ -53,6 +53,29 @@ D:\temp\claude\tdongle-flash-venv\Scripts\esptool.exe --chip esp32s3 -p COM14 -b
 If the board isn't in download mode (fresh MSC firmware running, or first flash ever), do the BOOT-hold
 dance first: unplug, hold BOOT, plug in, wait ~2s, release, then flash.
 
+### Why four files, not one?
+
+Every ESP32 flash is actually multiple separate writes to specific byte offsets in flash — there's no
+such thing as "the" firmware image, even for the simplest possible project. At minimum that's always a
+**bootloader** (tiny, its only job is finding and jumping to the app) plus a **partition table**
+(describes what lives where in flash — app, filesystem, NVS, etc.) plus the **app** itself. Tools that
+feel like "just flash one file" — `idf.py flash`, the Arduino IDE, `platformio run -t upload` — are
+still doing exactly this multi-region write under the hood; they're just hiding it behind one command by
+building the bootloader and partition table for you and remembering the offsets.
+
+The other common way projects genuinely ship as a single file is a **merged binary** — `esptool.py
+merge_bin` concatenates the separate pieces (with padding) into one flat image written at offset `0x0`,
+purely for distribution convenience. We don't currently do that (see "Cutting a release" below for why
+keeping the pieces separate is more useful here), but nothing stops you from merging the four files
+yourself with `esptool.py merge_bin` if you'd rather juggle one file locally.
+
+The **fourth** file, `ota_data_initial.bin`, is specific to *this* project rather than something every
+ESP32 build needs: our [partition table](../partitions.csv) has **two** app slots (`ota_0`/`ota_1`,
+see `code.md`) instead of the single-factory-partition layout most basic tutorials use, so there's a
+small state blob (`otadata`, at `0x0f000`) recording which slot is currently valid and should boot. A
+project with only one possible app location has nothing to choose between, so it skips this file
+entirely — that's the difference you're likely remembering from other ESP32 installs.
+
 If you'd rather stay fully in WSL and accept the occasional retry, `./scripts/flash.sh` after
 `usbipd attach`ing the board works too — see that script's header comment for the attach commands.
 
@@ -86,6 +109,14 @@ To publish one from WSL:
 This tags the current commit **before** building (`main/ota.c`'s own idea of its version comes from
 `git describe` at build time — see top-level `CMakeLists.txt` — so the tag has to exist first, or the
 binary embeds "N commits past the previous tag" instead of the tag it's actually released under, and
-the device's update-check never reports itself as up to date). Then it builds via Docker, pushes the
-tag, and publishes a GitHub release with the binary attached via `gh`. Requires `gh auth login` once
-beforehand.
+the device's update-check never reports itself as up to date). Then it builds via Docker, publishes a
+GitHub release with all four flash images attached via `gh`, and finally copies those same four files
+into `docs/` (overwriting whatever was there), bumps `docs/manifest.json`'s version, and pushes that as
+a follow-up commit — that's what keeps the [browser flasher](https://takigama.github.io/imagejockey/)
+in sync with the latest release. Requires `gh auth login` once beforehand.
+
+The web flasher itself is just `docs/index.html` + `docs/manifest.json` + those four `.bin` files,
+served by GitHub Pages (Settings → Pages → source: `master` branch, `/docs` folder). It uses
+[ESP Web Tools](https://esphome.github.io/esp-web-tools/) — the four files are checked into `docs/`
+rather than fetched live from Releases because GitHub's release-asset URLs aren't reliably
+CORS-enabled, which the in-browser flashing needs.

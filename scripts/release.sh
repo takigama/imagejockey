@@ -42,5 +42,21 @@ done
 
 gh release create "$TAG" "${ASSETS[@]}" --title "$TAG" --notes "$NOTES"
 
+# Keep the GitHub Pages web-flasher (docs/) in sync with what was just
+# released -- ESP Web Tools needs the four images same-origin as the page
+# itself (GitHub release assets aren't reliably CORS-enabled), so these are
+# a checked-in copy, not fetched live from Releases.
+cp build/bootloader/bootloader.bin docs/bootloader.bin
+cp build/partition_table/partition-table.bin docs/partition-table.bin
+cp build/ota_data_initial.bin docs/ota_data_initial.bin
+cp build/imagejockey.bin docs/imagejockey.bin
+jq --arg v "$TAG" '.version = $v' docs/manifest.json > docs/manifest.json.tmp
+mv docs/manifest.json.tmp docs/manifest.json
+
+git add docs/
+git commit -m "Update web-flasher assets for $TAG"
+git push origin master
+
 echo "Released $TAG with ${ASSETS[*]} attached -- devices on real WiFi can now OTA to it,"
-echo "and a first-time flash can now use just the downloaded release assets (see build.md)."
+echo "and a first-time flash can now use just the downloaded release assets (see build.md)"
+echo "or the web flasher at docs/ (once GitHub Pages is enabled for this repo)."

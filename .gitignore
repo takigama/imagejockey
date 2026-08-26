@@ -4,6 +4,7 @@ sdkconfig
 sdkconfig.old
 dependencies.lock
 *.bin
+!docs/*.bin
 *.elf
 *.map
 .claude/
