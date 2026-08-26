@@ -7,7 +7,9 @@ a raw USB disk — the same trick as `dd`-ing a hybrid ISO onto a USB stick, jus
 with write support for images you want to persist state on (e.g. a blank writable disk).
 
 Covers hybrid-ISO media (Junos installers, SystemRescue, Ubuntu live/install, and similar) and plain
-raw `.img` disks. Not a true SCSI CD-ROM emulator.
+raw `.img` disks. Not a true SCSI CD-ROM emulator. Its not the fastest thing in the world and hopefully
+if someone makes another t-dongle with a chip that has a faster usb (esp32's are 12mb/s max), it could
+actually work quite well. As it stands, takes about 8 minutes to boot a copy of systemrescuecd.
 
 ## Using it
 
