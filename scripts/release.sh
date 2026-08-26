@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Build the firmware and publish it as a GitHub release with the .bin
-# attached as an asset -- this is what the device's OTA update pulls from
-# (see main/ota.c's OTA_URL, which always points at the "latest" release).
+# Build the firmware and publish it as a GitHub release with all four flash
+# images attached -- imagejockey.bin is what the device's OTA update pulls
+# from (see main/ota.c's OTA_URL, which always points at the "latest"
+# release), and all four together are what a first-time flash from a
+# downloaded release needs (see build.md) -- bootloader/partition-table/
+# ota_data_initial rarely change between releases, but attaching them every
+# time is cheap and keeps "download the release and flash it" always correct.
 #
 # Requires `gh auth login` once beforehand.
 #
@@ -23,12 +27,20 @@ git push origin "$TAG"
 
 ./scripts/build.sh
 
-BIN="build/imagejockey.bin"
-if [[ ! -f "$BIN" ]]; then
-    echo "error: $BIN not found after build" >&2
-    exit 1
-fi
+ASSETS=(
+    "build/bootloader/bootloader.bin"
+    "build/partition_table/partition-table.bin"
+    "build/ota_data_initial.bin"
+    "build/imagejockey.bin"
+)
+for f in "${ASSETS[@]}"; do
+    if [[ ! -f "$f" ]]; then
+        echo "error: $f not found after build" >&2
+        exit 1
+    fi
+done
 
-gh release create "$TAG" "$BIN" --title "$TAG" --notes "$NOTES"
+gh release create "$TAG" "${ASSETS[@]}" --title "$TAG" --notes "$NOTES"
 
-echo "Released $TAG with $BIN attached -- devices on real WiFi can now OTA to it."
+echo "Released $TAG with ${ASSETS[*]} attached -- devices on real WiFi can now OTA to it,"
+echo "and a first-time flash can now use just the downloaded release assets (see build.md)."

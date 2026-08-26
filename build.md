@@ -23,8 +23,15 @@ otherwise.
 **Native Windows flashing is the reliable path** — `usbipd-win`-based flashing from WSL (passing the
 board's USB port through into WSL, `./scripts/flash.sh` etc.) works for *building*, but was unreliable for
 the flash step itself in practice (USB/IP corruption mid-transfer, lost auto-reset-to-bootloader signals).
-Flash directly from Windows instead, using the `.bin` files the Docker build already produced on the
-shared filesystem:
+Flash directly from Windows instead.
+
+Same command either way — only where the four files come from differs:
+
+- **From a build:** they're already in `build/` (`build/bootloader/bootloader.bin`,
+  `build/partition_table/partition-table.bin`, `build/ota_data_initial.bin`, `build/imagejockey.bin`).
+- **From a downloaded release:** every [release](https://github.com/takigama/imagejockey/releases) has
+  all four attached directly (no `build/` prefix, no subfolders) — just point the paths below at wherever
+  you downloaded them.
 
 ```powershell
 # One-time setup: a venv with esptool, anywhere convenient
@@ -37,10 +44,10 @@ D:\temp\claude\tdongle-flash-venv\Scripts\pip.exe install esptool
 D:\temp\claude\tdongle-flash-venv\Scripts\esptool.exe --chip esp32s3 -p COM14 -b 460800 `
   --before default-reset --after hard-reset write-flash `
   --flash-mode dio --flash-size 16MB --flash-freq 80m `
-  0x0 build/bootloader/bootloader.bin `
-  0x8000 build/partition_table/partition-table.bin `
-  0xf000 build/ota_data_initial.bin `
-  0x20000 build/imagejockey.bin
+  0x0 bootloader.bin `
+  0x8000 partition-table.bin `
+  0xf000 ota_data_initial.bin `
+  0x20000 imagejockey.bin
 ```
 
 If the board isn't in download mode (fresh MSC firmware running, or first flash ever), do the BOOT-hold

@@ -35,8 +35,9 @@ there's no separate USB drag-and-drop mode.
 
 ## Installing
 
-**First time:** there's no pre-built flash-everything package yet — build the firmware yourself (see
-[build.md](build.md)) and flash it via `esptool`, also covered there.
+**First time:** download the four files attached to the
+[latest release](https://github.com/takigama/imagejockey/releases/latest) and flash them with `esptool`
+— see [build.md](build.md) for the exact command.
 
 **After that:** updates don't need a cable. On the device's web page, hit "Check for update" (works
 fine with the drive still plugged in and in use) and, if one's available, "Update now" — the device
