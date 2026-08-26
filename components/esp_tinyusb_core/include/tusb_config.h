@@ -156,9 +156,13 @@ extern "C" {
 // MSC Buffer size of Device Mass storage. Hardcoded rather than routed
 // through CONFIG_TINYUSB_MSC_BUFSIZE -- that Kconfig option only exists
 // when TINYUSB_MSC_ENABLED is on, which this trimmed fork deliberately
-// leaves off (see CMakeLists.txt). 512 matches the upstream default for
-// ESP32-S3.
-#define CFG_TUD_MSC_BUFSIZE         512
+// leaves off (see CMakeLists.txt). Upstream's own default is 512 (one
+// sector), but that makes every single MSC transfer -- SD passthrough
+// writes especially -- pay full USB-transaction and SD-command overhead
+// per sector instead of amortizing it; media_read()/media_write() already
+// batch multi-sector sdmmc_read_sectors()/write_sectors() calls per
+// callback, they just never got handed more than one sector at a time.
+#define CFG_TUD_MSC_BUFSIZE         8192
 
 // MIDI macros
 #define CFG_TUD_MIDI_EP_BUFSIZE     64
